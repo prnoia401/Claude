@@ -4,7 +4,11 @@ import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +44,9 @@ object QuestController {
 
     @Volatile
     private var connection: AdbConnection? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var watchdog: Job? = null
 
     // Результат устаревшей попытки connect() не должен перетирать новую.
     @Volatile
@@ -78,15 +85,14 @@ object QuestController {
                     c.close()
                     return@withContext
                 }
-                c.onLost = { e ->
-                    if (connection === c) {
-                        connection = null
-                        _state.value = State.Failed("Связь потеряна: ${e.describe()}")
-                    }
-                }
+                c.onLost = { e -> lost(c, e) }
                 connection = c
+                startWatchdog(c)
                 val model = runCatching { c.shell("getprop ro.product.model").trim() }.getOrDefault("")
-                _state.value = State.Connected(c.transportDescription, model.ifEmpty { "Android" })
+                // Связь могла оборваться, пока спрашивали модель, — тогда не затираем ошибку.
+                if (connection === c) {
+                    _state.value = State.Connected(c.transportDescription, model.ifEmpty { "Android" })
+                }
             } catch (e: Exception) {
                 if (myAttempt == attempt) _state.value = State.Failed(e.describe())
             }
@@ -96,10 +102,37 @@ object QuestController {
         attempt++
         pendingTransport?.let { runCatching { it.close() } }
         pendingTransport = null
+        watchdog?.cancel()
         val c = connection
         connection = null
         c?.close()
         _state.value = State.Disconnected
+    }
+
+    private fun lost(c: AdbConnection, e: Throwable) {
+        if (connection !== c) return
+        watchdog?.cancel()
+        connection = null
+        c.close()
+        _state.value = State.Failed("Связь потеряна: ${e.describe()}")
+    }
+
+    /**
+     * Раз в 10 с проверяем, что шлем отвечает. Без этого «зависшая» связь
+     * выглядит как подключённая, а команды просто не выполняются.
+     */
+    private fun startWatchdog(c: AdbConnection) {
+        watchdog?.cancel()
+        watchdog = scope.launch {
+            while (connection === c) {
+                delay(WATCHDOG_PERIOD_MS)
+                try {
+                    c.shell("echo ok", timeoutS = WATCHDOG_TIMEOUT_S)
+                } catch (e: IOException) {
+                    lost(c, IOException("шлем не ответил на проверку связи (${e.message})", e))
+                }
+            }
+        }
     }
 
     /** Выполнить shell-команду на шлеме и вернуть её вывод. */
@@ -107,7 +140,7 @@ object QuestController {
 
     /** Открыть служебный сервис adbd (`reboot:`, `tcpip:5555`) и вернуть его ответ. */
     suspend fun service(destination: String): String = withClient { c ->
-        c.open(destination).use { String(it.readAllBytes()).trim() }
+        c.open(destination).use { String(it.readAllBytes(timeoutS = 15)).trim() }
     }
 
     /** Потоковая установка APK через `cmd package install -S` (Android 7+). */
@@ -125,13 +158,13 @@ object QuestController {
                     onProgress((sent * 100 / size).toInt())
                 }
             }
-            String(stream.readAllBytes()).trim()
+            String(stream.readAllBytes(timeoutS = 180)).trim()
         }
     }
 
     /** Скриншот текущего кадра шлема, сохранённый в кэш телефона. */
     suspend fun screenshot(): File = withClient { c ->
-        val png = c.open("exec:screencap -p").use { it.readAllBytes() }
+        val png = c.open("exec:screencap -p").use { it.readAllBytes(timeoutS = 30) }
         if (png.size < 8) throw IOException("Шлем вернул пустой скриншот")
         File(cacheDir, "shots").apply { mkdirs() }
             .resolve("quest_${System.currentTimeMillis()}.png")
@@ -161,8 +194,17 @@ object QuestController {
 
     private suspend fun <T> withClient(block: (AdbConnection) -> T): T = withContext(Dispatchers.IO) {
         val c = connection ?: throw IOException("Шлем не подключён")
-        block(c)
+        try {
+            block(c)
+        } catch (e: AdbTimeoutException) {
+            // Команда повисла — значит, шлем больше не отвечает. Честно показываем обрыв.
+            lost(c, e)
+            throw e
+        }
     }
+
+    private const val WATCHDOG_PERIOD_MS = 10_000L
+    private const val WATCHDOG_TIMEOUT_S = 10L
 
     fun Throwable.describe(): String {
         val root = generateSequence(this) { it.cause }.last()

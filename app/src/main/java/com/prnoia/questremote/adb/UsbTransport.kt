@@ -35,8 +35,16 @@ class UsbTransport private constructor(
         while (off < len) {
             val chunk = minOf(len - off, MAX_TRANSFER)
             val n = connection.bulkTransfer(epOut, buf, off, chunk, WRITE_TIMEOUT_MS)
-            if (n < 0) throw IOException("USB: запись не удалась (кабель отключён?)")
+            if (n < 0) throw IOException("USB: шлем не принял данные за ${WRITE_TIMEOUT_MS / 1000} с")
             off += n
+        }
+        // Как в оригинальном adb (usb_linux.cpp, zero_mask): если длина кратна размеру
+        // USB-пакета, добиваем нулевым пакетом. Иначе adbd не видит конца передачи,
+        // склеивает её со следующим заголовком и рвёт соединение.
+        if (len > 0 && len % epOut.maxPacketSize == 0) {
+            if (connection.bulkTransfer(epOut, buf, 0, 0, WRITE_TIMEOUT_MS) < 0) {
+                throw IOException("USB: не удалось отправить нулевой пакет")
+            }
         }
     }
 
@@ -47,7 +55,7 @@ class UsbTransport private constructor(
 
     companion object {
         private const val MAX_TRANSFER = 16 * 1024
-        private const val WRITE_TIMEOUT_MS = 5_000
+        private const val WRITE_TIMEOUT_MS = 15_000
 
         fun findAdbInterface(device: UsbDevice): UsbInterface? =
             (0 until device.interfaceCount).map(device::getInterface).firstOrNull {

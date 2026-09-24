@@ -77,19 +77,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var lastState: State? = null
+
     private fun render(state: State) {
-        binding.toolbar.subtitle = when (state) {
-            State.Disconnected -> "Не подключено"
-            is State.Connecting -> if (state.awaitingApproval) "Подтвердите доступ в шлеме…" else "Подключение: ${state.via}…"
-            is State.Connected -> "${state.model} · ${state.via}"
-            is State.Failed -> "Ошибка подключения"
+        // Журналируем смены состояния с временем, чтобы по экспорту консоли было видно,
+        // когда и почему оборвалась связь.
+        if (state != lastState) {
+            lastState = state
+            val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            val kind = if (state is State.Failed) ConsoleAdapter.Kind.ERROR else ConsoleAdapter.Kind.COMMAND
+            console.log("[$time] ${describe(state)}", kind)
         }
+        binding.toolbar.subtitle = describe(state)
         device.render(state)
         if (state is State.Connected) {
             device.refreshInfo()
         } else {
             console.stopLogcat()
         }
+    }
+
+    private fun describe(state: State): String = when (state) {
+        State.Disconnected -> "Не подключено"
+        is State.Connecting -> if (state.awaitingApproval) "Подтвердите доступ в шлеме…" else "Подключение: ${state.via}…"
+        is State.Connected -> "${state.model} · ${state.via}"
+        is State.Failed -> "Ошибка: ${state.message}"
     }
 
     fun toast(message: String) {

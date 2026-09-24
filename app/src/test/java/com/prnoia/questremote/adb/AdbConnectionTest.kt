@@ -133,6 +133,32 @@ class AdbConnectionTest {
         assertArrayEquals(apk, received.toByteArray())
     }
 
+    @Test
+    fun hungCommandTimesOutAndLateDataIsClosed() {
+        val gotClse = AtomicReference<Boolean>(false)
+        val device = fakeDevice { dev ->
+            dev.expect(A_CNXN)
+            dev.send(A_CNXN, 0x01000001, 4096, "device::\u0000".toByteArray())
+            val open = dev.expect(A_OPEN)
+            dev.send(A_OKAY, 300, open.arg0)
+            // Команда «зависла»: ничего не отвечаем. Клиент должен сдаться по таймауту и закрыть поток.
+            dev.expect(A_CLSE)
+            // Опоздавшие данные для уже закрытого потока — клиент должен ответить CLSE.
+            dev.send(A_WRTE, 300, open.arg0, "late".toByteArray())
+            gotClse.set(dev.expect(A_CLSE).arg1 == 300)
+        }
+        val c = AdbConnection.connect(TcpTransport("127.0.0.1", server.localPort), crypto, "t")
+        try {
+            c.shell("sleep 999", timeoutS = 1)
+            org.junit.Assert.fail("ожидался таймаут")
+        } catch (e: AdbTimeoutException) {
+            // ok
+        }
+        device.join(5_000)
+        c.close()
+        assertEquals(true, gotClse.get())
+    }
+
     // ---- поддельный adbd ----
 
     private class Msg(val cmd: Int, val arg0: Int, val arg1: Int, val payload: ByteArray)

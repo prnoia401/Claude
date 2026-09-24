@@ -92,8 +92,11 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
         Thread({
             try {
                 while (!isClosed) dispatch(receive())
-            } catch (e: IOException) {
+            } catch (t: Throwable) {
+                // Любая ошибка потока чтения (не только IOException) должна рвать соединение
+                // явно. Иначе поток молча умирает, а статус остаётся «Подключено».
                 if (!isClosed) {
+                    val e = t as? IOException ?: IOException("Сбой потока чтения: $t", t)
                     closeWith(e)
                     onLost?.invoke(e)
                 }
@@ -103,7 +106,13 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
 
     private fun dispatch(m: Message) {
         // Ответы шлема адресованы нашему local id в arg1.
-        val stream = streams[m.arg1] ?: return
+        val stream = streams[m.arg1]
+        if (stream == null) {
+            // Данные для уже закрытого у нас потока: просим шлем закрыть его со своей стороны,
+            // чтобы он не ждал подтверждения вечно.
+            if (m.command == A_WRTE) send(A_CLSE, m.arg1, m.arg0)
+            return
+        }
         when (m.command) {
             A_OKAY -> stream.onOkay(m.arg0)
             A_WRTE -> {
@@ -123,13 +132,18 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
         val stream = AdbStream(nextLocalId.getAndIncrement())
         streams[stream.localId] = stream
         send(A_OPEN, stream.localId, 0, "$destination\u0000".toByteArray())
-        stream.awaitOpen()
+        try {
+            stream.awaitOpen()
+        } catch (e: IOException) {
+            streams.remove(stream.localId)
+            throw e
+        }
         return stream
     }
 
-    /** Запустить команду и дождаться всего её вывода. */
-    fun shell(command: String): String =
-        open("shell:$command").use { String(it.readAllBytes()) }
+    /** Запустить команду и дождаться всего её вывода (не дольше [timeoutS] секунд). */
+    fun shell(command: String, timeoutS: Long = SHELL_TIMEOUT_S): String =
+        open("shell:$command").use { String(it.readAllBytes(timeoutS)) }
 
     private fun closeWith(cause: IOException) {
         isClosed = true
@@ -170,13 +184,15 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
 
         internal fun awaitOpen() {
             val r = okays.poll(OPEN_TIMEOUT_S, TimeUnit.SECONDS)
-                ?: throw IOException("Шлем не ответил на открытие потока")
+                ?: throw AdbTimeoutException("Шлем не ответил на открытие потока")
             if (r == -1) throw closedBy ?: IOException("Шлем отклонил команду")
         }
 
-        /** Следующий блок данных или null в конце потока. */
-        fun read(): ByteArray? {
-            val chunk = incoming.take()
+        /** Следующий блок данных или null в конце потока. [timeoutS] = 0 — ждать сколько угодно. */
+        fun read(timeoutS: Long = 0): ByteArray? {
+            val chunk = if (timeoutS <= 0) incoming.take()
+            else incoming.poll(timeoutS, TimeUnit.SECONDS)
+                ?: throw AdbTimeoutException("Шлем не ответил за $timeoutS с")
             if (chunk === EOF) {
                 incoming.offer(EOF)
                 closedBy?.let { throw it }
@@ -185,9 +201,10 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
             return chunk
         }
 
-        fun readAllBytes(): ByteArray {
+        /** Весь вывод до закрытия потока; [timeoutS] — максимальная пауза между блоками. */
+        fun readAllBytes(timeoutS: Long = 0): ByteArray {
             val out = ByteArrayOutputStream()
-            while (true) out.write(read() ?: break)
+            while (true) out.write(read(timeoutS) ?: break)
             return out.toByteArray()
         }
 
@@ -222,7 +239,7 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
                 val n = minOf(maxPayload, end - p)
                 send(A_WRTE, localId, remoteId, data.copyOfRange(p, p + n))
                 val ack = okays.poll(WRITE_ACK_TIMEOUT_S, TimeUnit.SECONDS)
-                    ?: throw IOException("Шлем не подтвердил запись")
+                    ?: throw AdbTimeoutException("Шлем не подтвердил запись")
                 if (ack == -1) throw closedBy ?: IOException("Поток закрыт шлемом")
                 p += n
             }
@@ -252,6 +269,7 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
         private const val MAX_ACCEPTED_PAYLOAD = 1024 * 1024
         private const val OPEN_TIMEOUT_S = 15L
         private const val WRITE_ACK_TIMEOUT_S = 30L
+        private const val SHELL_TIMEOUT_S = 60L
         private val EMPTY = ByteArray(0)
         private val EOF = ByteArray(0)
 
@@ -279,3 +297,6 @@ class AdbConnection private constructor(private val transport: AdbTransport) : A
         }
     }
 }
+
+/** Шлем перестал отвечать, хотя транспорт формально жив. */
+class AdbTimeoutException(message: String) : IOException(message)
