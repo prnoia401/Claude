@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 0x2833 — Oculus / Meta (Quest 1/2/3/Pro). -->
+    <usb-device vendor-id="10291" />
+</resources>

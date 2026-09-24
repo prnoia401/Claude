@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#1C6EF2</color>
+    <color name="icon_bg">#0F1B2D</color>
+    <color name="log_error">#E5484D</color>
+    <color name="log_warn">#E08A00</color>
+    <color name="log_cmd">#1C6EF2</color>
+    <color name="ok">#2E9E5B</color>
+</resources>

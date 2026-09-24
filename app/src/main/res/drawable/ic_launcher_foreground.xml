@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Шлем -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M30,40h48a8,8 0,0 1,8 8v12a8,8 0,0 1,-8 8h-12l-6,-6h-12l-6,6h-12a8,8 0,0 1,-8 -8v-12a8,8 0,0 1,8 -8z" />
+    <!-- Линзы -->
+    <path android:fillColor="#1C6EF2"
+        android:pathData="M42,54m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0M66,54m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+</vector>
