@@ -23,11 +23,22 @@ jobs:
       - name: Unit tests
         run: ./gradlew --no-daemon testDebugUnitTest
 
+      - name: Lint (API compatibility)
+        run: ./gradlew --no-daemon lintDebug
+
       - name: Build APK
         run: ./gradlew --no-daemon assembleDebug
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk QuestRemote-${{ github.run_number }}.apk
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report-${{ github.run_number }}
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:

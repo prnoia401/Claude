@@ -37,6 +37,16 @@ class ConsolePage(private val activity: MainActivity, private val b: PageConsole
         b.btnShare.setOnClickListener { export() }
         b.grep.doAfterTextChanged { adapter.grep = it?.toString().orEmpty() }
         b.btnRun.setOnClickListener { runInput() }
+        PRESETS.forEach { (label, args) ->
+            b.presets.addView(com.google.android.material.chip.Chip(activity).apply {
+                text = label
+                setOnClickListener { startLogcat(args) }
+            })
+        }
+        b.presets.addView(com.google.android.material.chip.Chip(activity).apply {
+            text = "Очистить буфер"
+            setOnClickListener { activity.runCommand("logcat -c", "logcat -c") }
+        })
         b.shellInput.setOnEditorActionListener { _, id, _ ->
             (id == EditorInfo.IME_ACTION_SEND).also { if (it) runInput() }
         }
@@ -98,5 +108,17 @@ class ConsolePage(private val activity: MainActivity, private val b: PageConsole
             .putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         activity.startActivity(Intent.createChooser(send, "Экспорт лога"))
+    }
+
+    private companion object {
+        val PRESETS = listOf(
+            "Ошибки" to "*:E",
+            "Предупреждения" to "*:W",
+            "Unity" to "-s Unity",
+            "Unreal" to "-s UE UE4",
+            "FPS (Quest)" to "-s VrApi",
+            "Падения" to "-b crash",
+            "Всё" to "",
+        )
     }
 }

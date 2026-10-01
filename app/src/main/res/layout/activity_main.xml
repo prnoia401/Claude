@@ -4,7 +4,6 @@
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fitsSystemWindows="true"
     android:orientation="vertical">
 
     <com.google.android.material.appbar.MaterialToolbar
@@ -21,6 +20,7 @@
 
         <include android:id="@+id/page_device" layout="@layout/page_device" />
         <include android:id="@+id/page_apps" layout="@layout/page_apps" android:visibility="gone" />
+        <include android:id="@+id/page_files" layout="@layout/page_files" android:visibility="gone" />
         <include android:id="@+id/page_tweaks" layout="@layout/page_tweaks" android:visibility="gone" />
         <include android:id="@+id/page_console" layout="@layout/page_console" android:visibility="gone" />
     </FrameLayout>

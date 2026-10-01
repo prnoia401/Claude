@@ -4,23 +4,35 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.hardware.usb.UsbDevice
+import android.text.InputType
+import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.core.content.FileProvider
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.prnoia.questremote.adb.DeviceProfile
 import com.prnoia.questremote.adb.NetworkScanner
 import com.prnoia.questremote.adb.QuestController
 import com.prnoia.questremote.adb.QuestController.State
 import com.prnoia.questremote.adb.UsbAdb
 import com.prnoia.questremote.databinding.PageDeviceBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class DevicePage(private val activity: MainActivity, private val b: PageDeviceBinding) {
 
     private val prefs = activity.getSharedPreferences("connection", Context.MODE_PRIVATE)
+    private var liveJob: Job? = null
+    private lateinit var recordChip: Chip
+    private lateinit var liveChip: Chip
 
     private class Action(val label: String, val confirm: String? = null, val run: () -> Unit)
 
@@ -34,14 +46,22 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
         b.btnDisconnect.setOnClickListener { QuestController.disconnect() }
         b.btnRefreshInfo.setOnClickListener { refreshInfo() }
 
+        if (!activity.packageManager.hasSystemFeature("android.hardware.usb.host")) {
+            b.usbHint.text = "Этот телефон не поддерживает режим USB-хоста — используйте Wi‑Fi " +
+                "(включите ADB по сети на шлеме с компьютера: adb tcpip 5555)."
+        }
+
         val actions = listOf(
             Action("Скриншот") { screenshot() },
-            Action("Домой") { activity.runCommand("Домой", "input keyevent KEYCODE_HOME") },
-            Action("Назад") { activity.runCommand("Назад", "input keyevent KEYCODE_BACK") },
-            Action("Громкость +") { activity.runCommand("Громкость +", "input keyevent KEYCODE_VOLUME_UP") },
-            Action("Громкость −") { activity.runCommand("Громкость −", "input keyevent KEYCODE_VOLUME_DOWN") },
-            Action("Разбудить") { activity.runCommand("Разбудить", "input keyevent KEYCODE_WAKEUP") },
-            Action("Усыпить") { activity.runCommand("Усыпить", "input keyevent KEYCODE_SLEEP") },
+            Action("Домой") { key("Домой", "KEYCODE_HOME") },
+            Action("Назад") { key("Назад", "KEYCODE_BACK") },
+            Action("Громкость +") { key("Громкость +", "KEYCODE_VOLUME_UP") },
+            Action("Громкость −") { key("Громкость −", "KEYCODE_VOLUME_DOWN") },
+            Action("Без звука") { key("Без звука", "KEYCODE_VOLUME_MUTE") },
+            Action("Разбудить") { key("Разбудить", "KEYCODE_WAKEUP") },
+            Action("Усыпить") { key("Усыпить", "KEYCODE_SLEEP") },
+            Action("Ввести текст") { typeText() },
+            Action("Открыть ссылку") { openUrl() },
             Action("Включить ADB по Wi‑Fi") { enableWifiAdb() },
             Action("Перезагрузить", confirm = "Перезагрузить шлем?") {
                 activity.runAction("Перезагрузка") { QuestController.service("reboot:") }
@@ -51,7 +71,7 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
             },
         )
         actions.forEach { action ->
-            val chip = Chip(activity).apply {
+            b.actions.addView(Chip(activity).apply {
                 text = action.label
                 setOnClickListener {
                     if (action.confirm == null) action.run()
@@ -61,9 +81,20 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
                         .setNegativeButton("Отмена", null)
                         .show()
                 }
-            }
-            b.actions.addView(chip)
+            })
         }
+        liveChip = Chip(activity).apply {
+            text = "Живой экран"
+            isCheckable = true
+            setOnClickListener { if (isChecked) startLiveView() else stopLiveView() }
+        }
+        recordChip = Chip(activity).apply {
+            text = "Запись видео"
+            isCheckable = true
+            setOnClickListener { toggleRecording() }
+        }
+        b.actions.addView(liveChip, 1)
+        b.actions.addView(recordChip, 2)
     }
 
     fun render(state: State) {
@@ -75,15 +106,21 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
                 } else {
                     "Подключение (${state.via})…"
                 }
-            is State.Connected -> "✅ ${state.model}\n${state.via}"
-            is State.Failed -> "❌ ${state.message}"
+            is State.Connected -> "✅ ${state.profile.name} (${state.profile.vendor.title})\n${state.via}"
+            is State.Failed -> "❌ ${state.message}" + if (state.reconnecting) "\nПереподключаюсь…" else ""
         }
         val busy = state is State.Connecting
         b.btnUsb.isEnabled = !busy
         b.btnWifi.isEnabled = !busy
-        b.btnDisconnect.isVisible = state is State.Connected || busy
-        if (state !is State.Connected) b.info.text = "—"
+        b.btnDisconnect.isVisible = state is State.Connected || busy ||
+            (state is State.Failed && state.reconnecting)
+        if (state !is State.Connected) {
+            b.info.text = "—"
+            recordChip.isChecked = false
+        }
     }
+
+    private fun key(title: String, code: String) = activity.runCommand(title, "input keyevent $code")
 
     // ---- Подключение ----
 
@@ -93,7 +130,10 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
             devices.isEmpty() -> MaterialAlertDialogBuilder(activity)
                 .setTitle("Шлем не найден по USB")
                 .setMessage(
-                    "1. Шлем в режиме разработчика (приложение Meta Horizon → Устройства → Режим разработчика).\n" +
+                    "1. На шлеме включён режим разработчика:\n" +
+                        "   • Quest — приложение Meta Horizon → Устройства → Режим разработчика;\n" +
+                        "   • PICO — Настройки → Общие → О устройстве → 7 раз нажать на номер сборки, " +
+                        "затем Настройки → Разработчик → Отладка по USB.\n" +
                         "2. Кабель Type‑C ↔ Type‑C с поддержкой данных, не только зарядки.\n" +
                         "3. Телефон — USB‑хост: опустите шторку, нажмите на уведомление USB → «USB управляет: это устройство». " +
                         "Если не помогло — переверните штекер на стороне шлема или подключите через OTG‑переходник.\n" +
@@ -180,18 +220,84 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
         return Regex("""inet (\d+\.\d+\.\d+\.\d+)""").find(out)?.groupValues?.get(1)
     }
 
+    // ---- Ввод ----
+
+    private fun prompt(title: String, hint: String, onOk: (String) -> Unit) {
+        val input = EditText(activity).apply {
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val box = FrameLayout(activity).apply {
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("Отправить") { _, _ -> onOk(input.text.toString()) }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    /** Набрать текст в активном поле шлема (логины, пароли, адреса). */
+    private fun typeText() = prompt("Ввести текст в шлеме", "Сначала выберите поле ввода в шлеме") { text ->
+        if (text.isEmpty()) return@prompt
+        if (text.any { it.code > 127 }) {
+            activity.toast("input text поддерживает только латиницу, цифры и символы ASCII")
+            return@prompt
+        }
+        // В `input text` пробел кодируется как %s.
+        activity.runCommand("Ввод текста", "input text ${QuestController.quote(text.replace(" ", "%s"))}")
+    }
+
+    private fun openUrl() = prompt("Открыть ссылку в шлеме", "https://…") { raw ->
+        val url = raw.trim().let { if ("://" in it) it else "https://$it" }
+        if (url.length <= 8) return@prompt
+        activity.runCommand(
+            "Открыть $url",
+            "am start -a android.intent.action.VIEW -d ${QuestController.quote(url)}"
+        )
+    }
+
     // ---- Информация ----
 
     fun refreshInfo() {
         if (!QuestController.isConnected) return
+        val profile = QuestController.profile
         activity.lifecycleScope.launch {
-            runCatching { QuestController.shell(INFO_SCRIPT) }
+            runCatching { QuestController.shell(infoScript(profile)) }
                 .onSuccess { b.info.text = it }
                 .onFailure { b.info.text = "Ошибка: ${it.message}" }
         }
     }
 
-    // ---- Скриншот ----
+    private fun infoScript(profile: DeviceProfile?): String {
+        val d = '$'
+        val meta = if (profile?.hasOculusProps == true) """
+            rr=${d}(getprop debug.oculus.refreshRate)
+            echo "Частота:     ${d}{rr:-по умолчанию} Гц"
+        """.trimIndent() else ""
+        return """
+            b=${d}(dumpsys battery)
+            lvl=${d}(echo "${d}b" | grep -m1 'level:' | tr -dc 0-9)
+            t=${d}(echo "${d}b" | grep -m1 'temperature:' | tr -dc 0-9)
+            plug=${d}(echo "${d}b" | grep -E 'AC powered: true|USB powered: true' | head -n 1)
+            echo "Устройство:  ${profile?.name ?: ""} (${d}(getprop ro.product.model))"
+            echo "Android:     ${d}(getprop ro.build.version.release) (SDK ${d}(getprop ro.build.version.sdk))"
+            echo "Сборка:      ${d}(getprop ro.build.display.id)"
+            echo "Серийный №:  ${d}(getprop ro.serialno)"
+            echo "Батарея:     ${d}{lvl}%${d}{plug:+ (заряжается)}"
+            [ -n "${d}t" ] && echo "Температура: ${d}((t / 10)).${d}((t % 10)) °C"
+            echo "Wi‑Fi IP:    ${d}(ip -f inet addr show wlan0 | grep -o 'inet [0-9.]*' | cut -d' ' -f2)"
+            $meta
+            echo "Аптайм:     ${d}(uptime)"
+            echo "Хранилище /data:"
+            df -h /data | tail -n 1
+        """.trimIndent()
+    }
+
+    // ---- Скриншот, живой экран, запись ----
 
     private fun screenshot() {
         activity.runAction("Скриншот") {
@@ -220,22 +326,56 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
             .show()
     }
 
-    companion object {
-        private val INFO_SCRIPT = """
-            b=${'$'}(dumpsys battery)
-            lvl=${'$'}(echo "${'$'}b" | grep -m1 'level:' | tr -dc 0-9)
-            t=${'$'}(echo "${'$'}b" | grep -m1 'temperature:' | tr -dc 0-9)
-            echo "Модель:      ${'$'}(getprop ro.product.model)"
-            echo "Android:     ${'$'}(getprop ro.build.version.release) (SDK ${'$'}(getprop ro.build.version.sdk))"
-            echo "Сборка:      ${'$'}(getprop ro.build.display.id)"
-            echo "Серийный №:  ${'$'}(getprop ro.serialno)"
-            echo "Батарея:     ${'$'}{lvl}%"
-            [ -n "${'$'}t" ] && echo "Температура: ${'$'}((t / 10)).${'$'}((t % 10)) °C"
-            echo "Wi‑Fi IP:    ${'$'}(ip -f inet addr show wlan0 | grep -o 'inet [0-9.]*' | cut -d' ' -f2)"
-            echo "Частота:     ${'$'}(getprop debug.oculus.refreshRate) Гц (пусто = по умолчанию)"
-            echo "Аптайм:      ${'$'}(uptime)"
-            echo "Хранилище /data:"
-            df -h /data | tail -n 1
-        """.trimIndent()
+    /** Обновляемый скриншот (≈1–2 кадра в секунду) — посмотреть, что видит человек в шлеме. */
+    private fun startLiveView() {
+        if (!QuestController.isConnected) {
+            liveChip.isChecked = false
+            activity.toast("Сначала подключите шлем")
+            return
+        }
+        liveJob?.cancel()
+        b.liveCard.isVisible = true
+        b.liveStatus.text = "Живой экран: загрузка…"
+        liveJob = activity.lifecycleScope.launch {
+            var frames = 0
+            val started = System.currentTimeMillis()
+            while (isActive && QuestController.isConnected) {
+                try {
+                    val png = QuestController.screenshotBytes()
+                    val bmp = withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(png, 0, png.size) }
+                    b.liveImage.setImageBitmap(bmp)
+                    frames++
+                    val fps = frames * 1000.0 / (System.currentTimeMillis() - started).coerceAtLeast(1)
+                    b.liveStatus.text = "Живой экран: %.1f кадр/с (скриншоты по ADB)".format(fps)
+                } catch (e: Exception) {
+                    b.liveStatus.text = "Ошибка: ${e.message}"
+                    delay(1_000)
+                }
+                delay(200)
+            }
+        }
+    }
+
+    fun stopLiveView() {
+        liveJob?.cancel()
+        liveJob = null
+        if (::liveChip.isInitialized) liveChip.isChecked = false
+        b.liveCard.isVisible = false
+        b.liveImage.setImageDrawable(null)
+    }
+
+    private fun toggleRecording() {
+        if (!QuestController.isRecording) {
+            recordChip.isChecked = false
+            activity.runAction("Запись видео") {
+                QuestController.startRecording()
+                recordChip.isChecked = true
+                "Запись идёт (до 3 минут). Нажмите «Запись видео» ещё раз, чтобы остановить и сохранить."
+            }
+        } else {
+            recordChip.isChecked = false
+            val name = "headset_${System.currentTimeMillis() / 1000}.mp4"
+            activity.saveToPhone(name, "Сохранение видео") { out -> QuestController.stopRecording(out) }
+        }
     }
 }

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 0x2833 — Oculus / Meta (Quest 1/2/3/Pro). -->
+    <!-- Любое устройство с ADB-интерфейсом (vendor-specific 0xFF / 0x42 / 0x01):
+         Meta Quest 2/3/3S/Pro, PICO Neo 3 / 4 / 4 Ultra и обычные Android. -->
+    <usb-device class="255" subclass="66" protocol="1" />
+    <!-- Meta / Oculus — на случай, если интерфейс ещё не поднят. -->
     <usb-device vendor-id="10291" />
 </resources>

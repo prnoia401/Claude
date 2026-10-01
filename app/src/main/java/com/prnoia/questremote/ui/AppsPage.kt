@@ -49,6 +49,14 @@ class AppsPage(private val activity: MainActivity, private val b: PageAppsBindin
         if (!loaded) reload()
     }
 
+    /** Новое подключение (возможно, к другому шлему) — список устарел. */
+    fun onConnected() {
+        loaded = false
+        packages = emptyList()
+        adapter.submit(emptyList())
+        if (b.root.isShown) reload()
+    }
+
     private fun reload() {
         if (!QuestController.isConnected) {
             b.appsStatus.text = "Шлем не подключён"
@@ -92,6 +100,7 @@ class AppsPage(private val activity: MainActivity, private val b: PageAppsBindin
                     }
                 }
             },
+            Item("Скачать APK на телефон") { downloadApk(pkg) },
             Item("Версия и сведения") {
                 activity.showTab(R.id.tab_console)
                 activity.runCommand(
@@ -115,14 +124,38 @@ class AppsPage(private val activity: MainActivity, private val b: PageAppsBindin
     }
 
     private fun launchApp(pkg: String) {
-        // VR-приложения Quest регистрируют категорию com.oculus.intent.category.VR,
-        // 2D-приложения — обычный LAUNCHER. Пробуем обе.
-        activity.runCommand(
-            "Запуск $pkg",
-            "monkey -p $pkg -c com.oculus.intent.category.VR 1 >/dev/null 2>&1 && echo 'Запущено (VR)' || " +
-                "(monkey -p $pkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 && echo 'Запущено' || " +
-                "echo 'Не найдена стартовая activity')"
+        // Ищем стартовую activity по категориям: VR-приложения Quest регистрируют
+        // com.oculus.intent.category.VR, PICO и 2D-приложения — обычный LAUNCHER.
+        val q = QuestController.quote(pkg)
+        val categories = listOf(
+            "com.oculus.intent.category.VR",
+            "android.intent.category.LAUNCHER",
+            "android.intent.category.LEANBACK_LAUNCHER",
+            "android.intent.category.INFO",
         )
+        val script = buildString {
+            append("for c in ${categories.joinToString(" ")}; do ")
+            append("a=\$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c \$c $q 2>/dev/null | tail -n 1); ")
+            append("case \"\$a\" in */*) am start -n \"\$a\" >/dev/null 2>&1 && echo \"Запущено: \$a\" && exit 0;; esac; ")
+            append("done; ")
+            append("monkey -p $q 1 >/dev/null 2>&1 && echo 'Запущено (monkey)' || echo 'Не найдена стартовая activity'")
+        }
+        activity.runCommand("Запуск $pkg", script)
+    }
+
+    /** Скачать установленный APK (base.apk) со шлема на телефон. */
+    private fun downloadApk(pkg: String) {
+        activity.lifecycleScope.launch {
+            val path = runCatching { QuestController.shell("pm path ${QuestController.quote(pkg)}") }
+                .getOrNull()?.lineSequence()
+                ?.map { it.removePrefix("package:").trim() }
+                ?.firstOrNull { it.endsWith("base.apk") || it.endsWith(".apk") }
+            if (path == null) {
+                activity.toast("Не удалось найти APK для $pkg")
+                return@launch
+            }
+            activity.saveToPhone("$pkg.apk", "Скачивание $pkg") { out -> QuestController.pull(path, out) }
+        }
     }
 
     private fun install(uri: Uri) {

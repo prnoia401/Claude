@@ -159,6 +159,101 @@ class AdbConnectionTest {
         assertEquals(true, gotClse.get())
     }
 
+    @Test
+    fun syncListPullPush() {
+        val file = Random.nextBytes(150_000)
+        val pushed = java.io.ByteArrayOutputStream()
+        var pushHeader = ""
+
+        val device = fakeDevice { dev ->
+            dev.expect(A_CNXN)
+            dev.send(A_CNXN, 0x01000001, 256 * 1024, "device::\u0000".toByteArray())
+            val open = dev.expect(A_OPEN)
+            assertEquals("sync:\u0000", String(open.payload))
+            dev.send(A_OKAY, 500, open.arg0)
+            val local = open.arg0
+            // Входящие данные sync — сплошной поток байт поверх нескольких WRTE.
+            val inbox = java.io.ByteArrayOutputStream()
+            var pos = 0
+            fun need(n: Int): ByteArray {
+                while (inbox.size() - pos < n) {
+                    val w = dev.expect(A_WRTE)
+                    inbox.write(w.payload)
+                    dev.send(A_OKAY, 500, local)
+                }
+                return inbox.toByteArray().copyOfRange(pos, pos + n).also { pos += n }
+            }
+            fun le(b: ByteArray) = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).int
+            fun reply(bytes: ByteArray) {
+                dev.send(A_WRTE, 500, local, bytes)
+                dev.expect(A_OKAY)
+            }
+            fun hdr(id: String, v: Int) =
+                ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).put(id.toByteArray()).putInt(v).array()
+            fun dent(id: String, mode: Int, size: Int, name: String) =
+                ByteBuffer.allocate(20 + name.length).order(ByteOrder.LITTLE_ENDIAN)
+                    .put(id.toByteArray()).putInt(mode).putInt(size).putInt(1700000000).putInt(name.length)
+                    .put(name.toByteArray()).array()
+
+            // LIST
+            assertEquals("LIST", String(need(4)))
+            assertEquals("/sdcard", String(need(le(need(4)))))
+            reply(dent("DENT", 0x41ED, 0, ".") + dent("DENT", 0x41ED, 0, "Download") + dent("DENT", 0x81A4, 42, "a.txt") + dent("DONE", 0, 0, ""))
+
+            // RECV: отдаём файл двумя DATA-блоками
+            assertEquals("RECV", String(need(4)))
+            assertEquals("/sdcard/f.bin", String(need(le(need(4)))))
+            reply(hdr("DATA", 100_000) + file.copyOfRange(0, 100_000))
+            reply(hdr("DATA", 50_000) + file.copyOfRange(100_000, 150_000) + hdr("DONE", 0))
+
+            // SEND
+            assertEquals("SEND", String(need(4)))
+            pushHeader = String(need(le(need(4))))
+            while (true) {
+                val id = String(need(4))
+                val len = le(need(4))
+                if (id == "DONE") break
+                assertEquals("DATA", id)
+                pushed.write(need(len))
+            }
+            reply(hdr("OKAY", 0))
+            assertEquals("QUIT", String(need(4)))
+            dev.send(A_CLSE, 500, local)
+        }
+
+        val c = AdbConnection.connect(TcpTransport("127.0.0.1", server.localPort), crypto, "t")
+        AdbSync(c.open("sync:")).use { sync ->
+            val entries = sync.list("/sdcard")
+            assertEquals(listOf("Download", "a.txt"), entries.map { it.name })
+            assertTrue(entries[0].isDirectory)
+            assertEquals(42L, entries[1].size)
+
+            val got = java.io.ByteArrayOutputStream()
+            sync.pull("/sdcard/f.bin", got)
+            assertArrayEquals(file, got.toByteArray())
+
+            sync.push(file.inputStream(), "/sdcard/up.bin")
+        }
+        device.join(5_000)
+        c.close()
+        assertEquals("/sdcard/up.bin,33188", pushHeader)
+        assertArrayEquals(file, pushed.toByteArray())
+    }
+
+    @Test
+    fun detectsHeadsetModels() {
+        fun probe(vararg l: String) = DeviceProfile.fromProbe(l.joinToString("\n"))
+        assertEquals("Quest 2", probe("Oculus", "oculus", "Quest 2", "hollywood").name)
+        assertEquals("Quest 3", probe("Oculus", "oculus", "Quest 3", "eureka").name)
+        assertEquals("Quest 3S", probe("Oculus", "oculus", "Quest 3S", "panther").name)
+        assertEquals(DeviceProfile.Vendor.PICO, probe("Pico", "Pico", "Pico Neo 3", "").vendor)
+        assertEquals("PICO Neo 3", probe("Pico", "Pico", "Pico Neo 3", "").name)
+        assertEquals("PICO 4", probe("PICO", "PICO", "A8110", "").name)
+        assertEquals(DeviceProfile.Vendor.OTHER, probe("Google", "google", "Pixel 8", "shiba").vendor)
+        assertTrue(probe("Oculus", "oculus", "Quest 3", "eureka").hasOculusProps)
+        assertTrue(!probe("Pico", "Pico", "A8110", "").hasOculusProps)
+    }
+
     // ---- поддельный adbd ----
 
     private class Msg(val cmd: Int, val arg0: Int, val arg1: Int, val payload: ByteArray)

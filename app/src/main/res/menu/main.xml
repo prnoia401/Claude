@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/menu_auto_reconnect" android:checkable="true" android:title="Автопереподключение" />
+    <item android:id="@+id/menu_keep_screen" android:checkable="true" android:title="Не гасить экран телефона" />
+    <item android:id="@+id/menu_about" android:title="О приложении" />
+</menu>
