@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Страница настроек больше не в нижней панели, но адресуется тем же id. -->
+    <item name="tab_tweaks" type="id" />
+</resources>

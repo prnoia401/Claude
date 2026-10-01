@@ -30,20 +30,24 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk QuestRemote-${{ github.run_number }}.apk
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk QuestRemote-${{ github.run_number }}.apk
+          cp client/build/outputs/apk/debug/client-debug.apk QuestRemoteClient-${{ github.run_number }}.apk
 
       - name: Upload lint report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lint-report-${{ github.run_number }}
-          path: app/build/reports/lint-results-debug.*
+          path: |
+            app/build/reports/lint-results-debug.*
+            client/build/reports/lint-results-debug.*
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
           name: QuestRemote-${{ github.run_number }}
-          path: QuestRemote-${{ github.run_number }}.apk
+          path: QuestRemote*-${{ github.run_number }}.apk
 
       # Отдельный релиз на каждую сборку: APK можно скачать прямо с телефона
       # со страницы Releases, без входа в GitHub Actions.
@@ -54,7 +58,10 @@ jobs:
           name: Quest Remote build ${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: true
-          files: QuestRemote-${{ github.run_number }}.apk
+          files: |
+            QuestRemote-${{ github.run_number }}.apk
+            QuestRemoteClient-${{ github.run_number }}.apk
           body: |
             Тестовая сборка из ветки `${{ github.ref_name }}` (${{ github.sha }}).
-            Установка: `adb install -r QuestRemote-${{ github.run_number }}.apk` или скачать файл на телефон и открыть.
+            Телефон: `adb install -r QuestRemote-${{ github.run_number }}.apk` (или скачать файл на телефон и открыть).
+            Клиент для шлема вшит в пульт (вкладка «Пульт» → «Установить клиент на шлем»); отдельный файл: QuestRemoteClient-${{ github.run_number }}.apk.

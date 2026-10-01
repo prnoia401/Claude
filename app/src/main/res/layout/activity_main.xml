@@ -19,6 +19,7 @@
         android:layout_weight="1">
 
         <include android:id="@+id/page_device" layout="@layout/page_device" />
+        <include android:id="@+id/page_remote" layout="@layout/page_remote" android:visibility="gone" />
         <include android:id="@+id/page_apps" layout="@layout/page_apps" android:visibility="gone" />
         <include android:id="@+id/page_files" layout="@layout/page_files" android:visibility="gone" />
         <include android:id="@+id/page_tweaks" layout="@layout/page_tweaks" android:visibility="gone" />

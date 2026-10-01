@@ -234,6 +234,9 @@ object QuestController {
         }
     }
 
+    /** Поток к TCP-порту на самом шлеме (как `adb forward`), например к клиенту пульта. */
+    suspend fun openTunnel(port: Int): AdbConnection.AdbStream = withClient { it.open("tcp:$port") }
+
     // ---- Файлы (протокол sync) ----
 
     suspend fun listDir(path: String): List<AdbSync.Entry> = withSync { it.list(path) }

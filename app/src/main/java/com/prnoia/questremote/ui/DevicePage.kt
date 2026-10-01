@@ -45,6 +45,7 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
         b.btnScan.setOnClickListener { scan() }
         b.btnDisconnect.setOnClickListener { QuestController.disconnect() }
         b.btnRefreshInfo.setOnClickListener { refreshInfo() }
+        b.btnTweaks.setOnClickListener { activity.showTab(com.prnoia.questremote.R.id.tab_tweaks) }
 
         if (!activity.packageManager.hasSystemFeature("android.hardware.usb.host")) {
             b.usbHint.text = "Этот телефон не поддерживает режим USB-хоста — используйте Wi‑Fi " +

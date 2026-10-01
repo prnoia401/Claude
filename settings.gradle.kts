@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "QuestRemote"
-include(":app")
+include(":app", ":client")

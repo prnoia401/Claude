@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var device: DevicePage
     private lateinit var apps: AppsPage
     private lateinit var files: FilesPage
+    private lateinit var remote: RemotePage
     private lateinit var tweaks: TweaksPage
 
     val usbManager: UsbManager by lazy { getSystemService(UsbManager::class.java) }
@@ -63,10 +64,24 @@ class MainActivity : AppCompatActivity() {
         device = DevicePage(this, binding.pageDevice)
         apps = AppsPage(this, binding.pageApps)
         files = FilesPage(this, binding.pageFiles)
+        remote = RemotePage(this, binding.pageRemote)
         tweaks = TweaksPage(this, binding.pageTweaks)
 
         setupMenu()
         applyKeepScreenOn()
+
+        // «Назад» со страницы настроек возвращает на вкладку «Шлем», а не закрывает приложение.
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (binding.pageTweaks.root.visibility == View.VISIBLE) {
+                    showTab(R.id.tab_device)
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
 
         binding.bottomNav.setOnItemSelectedListener { item ->
             showTab(item.itemId)
@@ -156,8 +171,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun showTab(id: Int) {
-        binding.bottomNav.menu.findItem(id)?.isChecked = true
+        // «Настройки» открываются с вкладки «Шлем», поэтому подсвечиваем её.
+        val navId = if (id == R.id.tab_tweaks) R.id.tab_device else id
+        binding.bottomNav.menu.findItem(navId)?.isChecked = true
         binding.pageDevice.root.visibility = if (id == R.id.tab_device) View.VISIBLE else View.GONE
+        binding.pageRemote.root.visibility = if (id == R.id.tab_remote) View.VISIBLE else View.GONE
         binding.pageApps.root.visibility = if (id == R.id.tab_apps) View.VISIBLE else View.GONE
         binding.pageFiles.root.visibility = if (id == R.id.tab_files) View.VISIBLE else View.GONE
         binding.pageTweaks.root.visibility = if (id == R.id.tab_tweaks) View.VISIBLE else View.GONE
@@ -165,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         when (id) {
             R.id.tab_apps -> apps.onShown()
             R.id.tab_files -> files.onShown()
+            R.id.tab_remote -> remote.onShown()
             R.id.tab_tweaks -> tweaks.onShown()
         }
         if (id != R.id.tab_device) device.stopLiveView()

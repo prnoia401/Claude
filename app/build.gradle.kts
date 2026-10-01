@@ -46,11 +46,24 @@ android {
         disable += setOf("HardcodedText", "SetTextI18n", "NotifyDataSetChanged", "GradleDependency", "OldTargetApi")
     }
 
+    sourceSets {
+        // APK клиента для шлема кладём в assets — пульт ставит его одной кнопкой.
+        getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/clientApk").get().asFile)
+    }
+
     buildFeatures {
         viewBinding = true
         buildConfig = true
     }
 }
+
+val copyClientApk by tasks.registering(Copy::class) {
+    dependsOn(":client:assembleDebug")
+    from(rootProject.file("client/build/outputs/apk/debug/client-debug.apk"))
+    into(layout.buildDirectory.dir("generated/clientApk"))
+    rename { "client.apk" }
+}
+tasks.named("preBuild") { dependsOn(copyClientApk) }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
