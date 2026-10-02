@@ -34,10 +34,17 @@ adb push /tmp/qr_test.mp4 /sdcard/Movies/qr_test.mp4
 adb shell getprop ro.adb.secure || true
 adb shell 'echo | nc -w 3 10.0.2.2 5555 >/dev/null 2>&1 && echo "ADB-порт эмулятора доступен изнутри" || echo "WARN: 10.0.2.2:5555 недоступен"' || true
 
+echo "=== Диагностика громкости ==="
+adb shell 'cmd media_session volume --stream 3 --get' 2>&1 | head -5 || true
+adb shell 'media volume --stream 3 --get' 2>&1 | head -5 || true
+adb shell 'dumpsys audio' 2>&1 | grep -A8 -- '- STREAM_MUSIC:' | head -10 || true
+
 adb logcat -c || true
 set +e
 adb shell am instrument -w -r -e adbHost 10.0.2.2 -e adbPort 5555 $APP.test/androidx.test.runner.AndroidJUnitRunner | tee /tmp/instrument.txt
 set -e
 adb logcat -d > /tmp/logcat.txt || true
+echo "=== logcat: приложение, клиент, падения ==="
+grep -E "QuestRemote|questclient|AndroidRuntime|FATAL|Background activity start|BAL_" /tmp/logcat.txt | tail -120 || true
 grep -E "INSTRUMENTATION_STATUS: test=|INSTRUMENTATION_STATUS_CODE: -2|^OK \(|FAILURES" /tmp/instrument.txt || true
 grep -q "^OK (" /tmp/instrument.txt

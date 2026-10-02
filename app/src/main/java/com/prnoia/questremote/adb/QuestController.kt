@@ -204,6 +204,7 @@ object QuestController {
 
     private fun lost(c: AdbConnection, e: Throwable) {
         if (connection !== c) return
+        android.util.Log.w("QuestRemote", "ADB-связь потеряна: ${e.describe()}", e)
         watchdog?.cancel()
         connection = null
         recording = null
@@ -235,12 +236,18 @@ object QuestController {
     private fun startWatchdog(c: AdbConnection) {
         watchdog?.cancel()
         watchdog = scope.launch {
+            var misses = 0
             while (connection === c) {
                 delay(WATCHDOG_PERIOD_MS)
                 try {
                     c.shell("echo ok", timeoutS = WATCHDOG_TIMEOUT_S)
+                    misses = 0
                 } catch (e: IOException) {
-                    lost(c, IOException("шлем не ответил на проверку связи (${e.message})", e))
+                    // Шлем бывает занят (запуск тяжёлого приложения) — рвём связь только
+                    // после двух неответов подряд, а не после одного.
+                    if (c.isClosed || ++misses >= 2) {
+                        lost(c, IOException("шлем не ответил на проверку связи (${e.message})", e))
+                    }
                 }
             }
         }
@@ -293,46 +300,43 @@ object QuestController {
         }
     }
 
-    /** Громкость медиа на шлеме: текущее значение и максимум. */
-    data class Volume(val current: Int, val max: Int) {
-        val percent: Int get() = if (max > 0) current * 100 / max else 0
-        override fun toString() = "Громкость $current из $max ($percent%)"
-    }
-
-    // Какая из команд управления громкостью работает на этом шлеме (зависит от версии Android).
-    @Volatile
-    private var volumeTool: String? = null
-
-    private val volumeRegex = Regex("""volume is (\d+) in range \[(\d+)\.\.(\d+)]""")
-
-    private suspend fun volumeCmd(tool: String, args: String): Volume? {
-        val apply = if (args.isEmpty()) "" else "$tool --stream 3 $args >/dev/null 2>&1; "
-        return volumeRegex.findAll(shell("$apply$tool --stream 3 --get 2>&1")).lastOrNull()?.let {
-            Volume(it.groupValues[1].toInt(), it.groupValues[3].toInt())
-        }
+    /**
+     * Текущая громкость медиа. Сначала `cmd media_session volume --get`, затем разбор
+     * `dumpsys audio` (есть на всех версиях Android, в т.ч. на Quest и PICO).
+     */
+    suspend fun readMediaVolume(): Volume? {
+        val cmdOut = shell("cmd media_session volume --stream 3 --get 2>&1; media volume --stream 3 --get 2>&1")
+        VolumeParser.fromVolumeCommand(cmdOut)?.let { return it }
+        return VolumeParser.fromDumpsysAudio(shell("dumpsys audio 2>/dev/null"))
     }
 
     /**
-     * Изменить громкость медиа: [delta] шагов (±) или [percent] 0–100.
-     * Сначала через аудиосервис (`cmd media_session volume` / `media volume`), с проверкой
-     * результата; если шлем их не поддерживает — нажатиями клавиш громкости.
+     * Изменить громкость медиа: [delta] шагов (±) или [percent] 0–100. Пробуем по очереди
+     * `cmd media_session volume --set`, `media volume --set`, затем клавиши громкости —
+     * и после каждого способа перечитываем фактическое значение.
      */
     suspend fun mediaVolume(delta: Int = 0, percent: Int? = null): Volume? {
-        val tools = listOfNotNull(volumeTool) + listOf("cmd media_session volume", "media volume")
-        for (tool in tools.distinct()) {
-            val before = volumeCmd(tool, "") ?: continue
-            volumeTool = tool
-            val target = when {
-                percent != null -> (percent.coerceIn(0, 100) * before.max + 50) / 100
-                else -> (before.current + delta).coerceIn(0, before.max)
-            }
-            return volumeCmd(tool, "--set $target")
+        val before = readMediaVolume()
+        if (before == null) {
+            // Значение прочитать нельзя — только клавиши, направление из запроса.
+            val up = if (percent != null) percent >= 50 else delta > 0
+            val presses = if (percent != null) 15 else kotlin.math.abs(delta).coerceAtLeast(1)
+            shell(List(presses) { "input keyevent ${if (up) "KEYCODE_VOLUME_UP" else "KEYCODE_VOLUME_DOWN"}" }.joinToString("; "))
+            return null
         }
-        // Нет консольной команды громкости — жмём клавиши.
-        val key = if ((percent ?: 50) > 50 || delta > 0) "KEYCODE_VOLUME_UP" else "KEYCODE_VOLUME_DOWN"
-        val presses = if (percent != null) 15 else kotlin.math.abs(delta).coerceAtLeast(1)
-        shell(List(presses) { "input keyevent $key" }.joinToString("; "))
-        return null
+        val target = if (percent != null) (percent.coerceIn(0, 100) * before.max + 50) / 100
+        else (before.current + delta).coerceIn(0, before.max)
+        if (target == before.current) return before
+        for (tool in listOf("cmd media_session volume", "media volume")) {
+            shell("$tool --stream 3 --set $target >/dev/null 2>&1")
+            val now = readMediaVolume()
+            if (now != null && now.current == target) return now
+        }
+        // Консольные команды не сработали — жмём клавиши нужное число раз в нужную сторону.
+        val diff = target - before.current
+        val key = if (diff > 0) "KEYCODE_VOLUME_UP" else "KEYCODE_VOLUME_DOWN"
+        shell(List(kotlin.math.abs(diff)) { "input keyevent $key" }.joinToString("; "))
+        return readMediaVolume()
     }
 
     /** Поток к TCP-порту на самом шлеме (как `adb forward`), например к клиенту пульта. */
@@ -431,7 +435,7 @@ object QuestController {
     fun quote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
     private const val WATCHDOG_PERIOD_MS = 10_000L
-    private const val WATCHDOG_TIMEOUT_S = 10L
+    private const val WATCHDOG_TIMEOUT_S = 15L
     private const val RECONNECT_ATTEMPTS = 5
     private const val HANDSHAKE_TIMEOUT_MS = 8_000L
     private const val APPROVAL_TIMEOUT_MS = 90_000L
