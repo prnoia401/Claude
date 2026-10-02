@@ -175,18 +175,29 @@ class AdbConnectionTest {
             // Входящие данные sync — сплошной поток байт поверх нескольких WRTE.
             val inbox = java.io.ByteArrayOutputStream()
             var pos = 0
-            fun need(n: Int): ByteArray {
-                while (inbox.size() - pos < n) {
-                    val w = dev.expect(A_WRTE)
-                    inbox.write(w.payload)
-                    dev.send(A_OKAY, 500, local)
+            // Как настоящий adbd: OKAY на наши WRTE и новые WRTE клиента могут прийти
+            // в любом порядке (клиент не обязан ждать подтверждения перед следующим запросом).
+            var pendingOkays = 0
+            fun pump() {
+                val m = dev.next()
+                when (m.cmd) {
+                    A_WRTE -> {
+                        inbox.write(m.payload)
+                        dev.send(A_OKAY, 500, local)
+                    }
+                    A_OKAY -> pendingOkays--
+                    else -> throw AssertionError("неожиданная команда ${Integer.toHexString(m.cmd)}")
                 }
+            }
+            fun need(n: Int): ByteArray {
+                while (inbox.size() - pos < n) pump()
                 return inbox.toByteArray().copyOfRange(pos, pos + n).also { pos += n }
             }
             fun le(b: ByteArray) = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).int
             fun reply(bytes: ByteArray) {
                 dev.send(A_WRTE, 500, local, bytes)
-                dev.expect(A_OKAY)
+                pendingOkays++
+                while (pendingOkays > 0) pump()
             }
             fun hdr(id: String, v: Int) =
                 ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).put(id.toByteArray()).putInt(v).array()
@@ -263,6 +274,12 @@ class AdbConnectionTest {
         private val output: OutputStream = socket.getOutputStream()
 
         fun expect(cmd: Int): Msg {
+            val m = next()
+            assertEquals("команда", Integer.toHexString(cmd), Integer.toHexString(m.cmd))
+            return m
+        }
+
+        fun next(): Msg {
             val h = ByteArray(24).also(input::readFully)
             val b = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN)
             val m = Msg(b.int, b.int, b.int, ByteArray(b.int))
@@ -270,7 +287,6 @@ class AdbConnectionTest {
             assertEquals("magic", m.cmd.inv(), b.int)
             input.readFully(m.payload)
             assertEquals("checksum", m.payload.sumOf { it.toInt() and 0xFF }, checksum)
-            assertEquals("команда", Integer.toHexString(cmd), Integer.toHexString(m.cmd))
             return m
         }
 
