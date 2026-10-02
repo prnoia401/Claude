@@ -13,7 +13,10 @@ import com.prnoia.questremote.adb.AdbSync
 import com.prnoia.questremote.adb.QuestController
 import com.prnoia.questremote.adb.RemoteLink
 import com.prnoia.questremote.ui.MainActivity
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -114,11 +117,11 @@ class EndToEndTest {
         val marker = "qr_${Random.nextInt(1_000_000)}"
         val line = withTimeout(20_000) {
             val flow = QuestController.logcat("-s QRTEST")
-            kotlinx.coroutines.coroutineScope {
-                val job = kotlinx.coroutines.launch {
+            coroutineScope {
+                val job = launch {
                     repeat(20) {
                         QuestController.shell("log -t QRTEST $marker")
-                        kotlinx.coroutines.delay(500)
+                        delay(500)
                     }
                 }
                 flow.first { marker in it }.also { job.cancel() }

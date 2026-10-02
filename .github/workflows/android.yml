@@ -27,7 +27,7 @@ jobs:
         run: ./gradlew --no-daemon lintDebug
 
       - name: Build APK
-        run: ./gradlew --no-daemon assembleDebug
+        run: ./gradlew --no-daemon assembleDebug :app:assembleDebugAndroidTest
 
       - name: Rename APK
         run: |
