@@ -8,6 +8,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 /**
  * TCP-сервер команд. Каждое подключение — свой поток, сообщения — JSON-строки.
@@ -18,6 +19,10 @@ class CommandServer(private val handler: CommandHandler, private val pin: () -> 
     private class Client(val socket: Socket, val out: PrintWriter, @Volatile var authed: Boolean)
 
     private val clients = CopyOnWriteArrayList<Client>()
+
+    // Запись в сокеты — только в фоне: из главного потока Android роняет процесс
+    // (NetworkOnMainThreadException), а статус плеера рассылается из главного.
+    private val sender = Executors.newSingleThreadExecutor { r -> Thread(r, "cmd-broadcast").apply { isDaemon = true } }
     private var server: ServerSocket? = null
 
     val clientCount: Int get() = clients.count { it.authed }
@@ -37,18 +42,21 @@ class CommandServer(private val handler: CommandHandler, private val pin: () -> 
     }
 
     fun stop() {
+        sender.shutdownNow()
         runCatching { server?.close() }
         clients.forEach { runCatching { it.socket.close() } }
         clients.clear()
     }
 
-    /** Разослать событие всем авторизованным пультам. */
+    /** Разослать событие всем авторизованным пультам (можно звать из любого потока). */
     fun broadcast(event: JSONObject) {
         val line = event.toString()
-        clients.filter { it.authed }.forEach { c ->
-            synchronized(c.out) {
-                c.out.println(line)
-                if (c.out.checkError()) clients.remove(c)
+        sender.execute {
+            clients.filter { it.authed }.forEach { c ->
+                synchronized(c.out) {
+                    c.out.println(line)
+                    if (c.out.checkError()) clients.remove(c)
+                }
             }
         }
     }

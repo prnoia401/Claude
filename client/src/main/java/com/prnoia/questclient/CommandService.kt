@@ -25,12 +25,16 @@ class CommandService : Service() {
 
     private val ticker = object : Runnable {
         override fun run() {
-            Player.activity?.tick()
-            val status = Player.status(this@CommandService)
-            val key = status.toString()
-            if (key != lastStatus) {
-                lastStatus = key
-                server?.broadcast(JSONObject(key).put("event", "status"))
+            try {
+                Player.activity?.tick()
+                val status = Player.status(this@CommandService)
+                val key = status.toString()
+                if (key != lastStatus) {
+                    lastStatus = key
+                    server?.broadcast(JSONObject(key).put("event", "status"))
+                }
+            } catch (e: Exception) {
+                ClientLog.add("ошибка статуса: ${e.message}")
             }
             main.postDelayed(this, 1_000)
         }

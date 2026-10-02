@@ -222,7 +222,10 @@ class EndToEndTest {
     @Test
     fun t10_uiVolumeButtonWorks() {
         connectIfNeeded()
-        runBlocking { QuestController.mediaVolume(percent = 0) }
+        runBlocking {
+            QuestController.shell("input keyevent KEYCODE_HOME")
+            QuestController.mediaVolume(percent = 0)
+        }
         waitUntil("громкость 0") { music == 0 }
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText("Громкость 50%")).perform(scrollTo(), click())
