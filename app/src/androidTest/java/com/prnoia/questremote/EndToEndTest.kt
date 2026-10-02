@@ -258,7 +258,24 @@ class EndToEndTest {
                 Thread.sleep(500)
             }
         }
-        throw AssertionError("Не нашли на экране «$text»: ${last?.message?.take(200)}")
+        throw AssertionError("Не нашли на экране «$text». Видно: ${visibleTexts()} | ${last?.message?.take(150)}")
+    }
+
+    /** Тексты всех видимых TextView во всех окнах приложения — для понятной ошибки теста. */
+    private fun visibleTexts(): String {
+        val out = mutableListOf<String>()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val activities = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)
+            out += "resumed=${activities.map { it.javaClass.simpleName }}"
+            fun walk(v: android.view.View) {
+                if (v.visibility != android.view.View.VISIBLE) return
+                if (v is android.widget.TextView && v.text.isNotBlank()) out += v.text.toString().take(40)
+                if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+            }
+            activities.forEach { walk(it.window.decorView) }
+        }
+        return out.take(60).joinToString(" · ")
     }
 
     private fun clickTab(id: Int) = onView(withId(id)).perform(click())
