@@ -6,7 +6,9 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.action.ViewActions.scrollTo
+import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
+import org.hamcrest.Matchers.containsString
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.prnoia.questremote.adb.AdbSync
@@ -232,6 +234,68 @@ class EndToEndTest {
             waitUntil("кнопка «Громкость 50%» изменила громкость") { music == (50 * musicMax + 50) / 100 }
             onView(withText("Громкость +")).perform(scrollTo(), click())
             waitUntil("кнопка «Громкость +»") { music == (50 * musicMax + 50) / 100 + 1 }
+        }
+    }
+
+    /** Найти view с текстом (ждём, пока появится после асинхронной загрузки) и нажать. */
+    private fun clickWhenShown(text: String, timeoutMs: Long = 30_000, partial: Boolean = false) {
+        val matcher = if (partial) withText(containsString(text)) else withText(text)
+        val end = System.currentTimeMillis() + timeoutMs
+        var last: Throwable? = null
+        while (System.currentTimeMillis() < end) {
+            try {
+                onView(matcher).perform(scrollTo(), click())
+                return
+            } catch (e: Throwable) {
+                last = e
+            }
+            // Элементы RecyclerView не поддерживают scrollTo — пробуем просто нажать.
+            try {
+                onView(matcher).perform(click())
+                return
+            } catch (e: Throwable) {
+                last = e
+                Thread.sleep(500)
+            }
+        }
+        throw AssertionError("Не нашли на экране «$text»: ${last?.message?.take(200)}")
+    }
+
+    private fun clickTab(id: Int) = onView(withId(id)).perform(click())
+
+    @Test
+    fun t12_uiRemoteTabPlaysAndPauses() {
+        connectIfNeeded()
+        ActivityScenario.launch(MainActivity::class.java).use {
+            clickTab(R.id.tab_remote)
+            // Вкладка сама ставит/запускает клиент и подключается, затем показывает список видео.
+            clickWhenShown("🎬 qr_test.mp4", timeoutMs = 60_000)
+            val probe = link()
+            try {
+                waitUntil("видео играет после нажатия в списке", 30_000) { probe.state() == "playing" }
+                // На эмуляторе плеер открылся поверх пульта (это одно устройство) — возвращаем пульт.
+                runBlocking { QuestController.shell("am start -n com.prnoia.questremote/.ui.MainActivity") }
+                Thread.sleep(1_500)
+                clickWhenShown("▶ / ⏸")
+                waitUntil("пауза после нажатия ▶/⏸") { probe.state() == "paused" }
+                clickWhenShown("+10 с")
+                clickWhenShown("⏹ Стоп")
+                waitUntil("стоп после нажатия ⏹") { probe.state() == "idle" }
+            } finally {
+                probe.close()
+            }
+        }
+    }
+
+    @Test
+    fun t13_uiFilesAndAppsTabsLoad() {
+        connectIfNeeded()
+        ActivityScenario.launch(MainActivity::class.java).use {
+            clickTab(R.id.tab_files)
+            clickWhenShown("📁 Download")
+            clickTab(R.id.tab_apps)
+            clickWhenShown("com.prnoia.questclient")
+            clickWhenShown("Версия и сведения")
         }
     }
 
