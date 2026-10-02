@@ -33,7 +33,7 @@ import kotlin.random.Random
 
 /**
  * Сквозная проверка на эмуляторе: телефон и «шлем» — одно устройство, приложение подключается
- * к собственному adbd по 127.0.0.1:5555 (CI заранее включает adbd по TCP и выдаёт ключ).
+ * к собственному adbd через ADB-порт эмулятора (CI заранее выдаёт приложению авторизованный ключ).
  * Шаги идут по порядку и используют общее подключение.
  */
 @RunWith(AndroidJUnit4::class)
@@ -54,8 +54,15 @@ class EndToEndTest {
         throw AssertionError("Не дождались: $what")
     }
 
+    // В эмуляторе adbd не слушает TCP внутри системы: он доступен через ADB-порт эмулятора
+    // на стороне хоста, который изнутри виден как 10.0.2.2:5555. CI передаёт адрес аргументами.
+    private val adbHost: String
+        get() = InstrumentationRegistry.getArguments().getString("adbHost") ?: "10.0.2.2"
+    private val adbPort: Int
+        get() = InstrumentationRegistry.getArguments().getString("adbPort")?.toIntOrNull() ?: 5555
+
     private fun connectIfNeeded() = runBlocking {
-        if (!QuestController.isConnected) QuestController.connectWifi("127.0.0.1", 5555)
+        if (!QuestController.isConnected) QuestController.connectWifi(adbHost, adbPort)
         assertTrue("ADB не подключился: ${QuestController.state.value}", QuestController.isConnected)
     }
 

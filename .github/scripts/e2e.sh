@@ -29,21 +29,14 @@ ffmpeg -loglevel error -f lavfi -i testsrc=duration=30:size=320x240:rate=25 \
 adb shell mkdir -p /sdcard/Movies
 adb push /tmp/qr_test.mp4 /sdcard/Movies/qr_test.mp4
 
-# adbd внутри эмулятора должен слушать TCP 5555 (как шлем после «adb tcpip 5555»).
-if ! adb shell 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' | grep -qi ':15B3 .* 0A '; then
-  adb tcpip 5555 || true
-  sleep 5
-  adb wait-for-device
-  adb root || true
-  sleep 3
-  adb wait-for-device
-fi
-adb shell 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' | grep -i ':15B3' || echo "WARN: порт 5555 не виден в /proc/net/tcp"
+# Внутри эмулятора adbd работает через qemu-pipe, а не TCP; приложение достучится до него
+# через ADB-порт эмулятора на хосте: изнутри это 10.0.2.2:5555 (emulator-5554).
 adb shell getprop ro.adb.secure || true
+adb shell 'echo | nc -w 3 10.0.2.2 5555 >/dev/null 2>&1 && echo "ADB-порт эмулятора доступен изнутри" || echo "WARN: 10.0.2.2:5555 недоступен"' || true
 
 adb logcat -c || true
 set +e
-adb shell am instrument -w -r $APP.test/androidx.test.runner.AndroidJUnitRunner | tee /tmp/instrument.txt
+adb shell am instrument -w -r -e adbHost 10.0.2.2 -e adbPort 5555 $APP.test/androidx.test.runner.AndroidJUnitRunner | tee /tmp/instrument.txt
 set -e
 adb logcat -d > /tmp/logcat.txt || true
 grep -E "INSTRUMENTATION_STATUS: test=|INSTRUMENTATION_STATUS_CODE: -2|^OK \(|FAILURES" /tmp/instrument.txt || true
