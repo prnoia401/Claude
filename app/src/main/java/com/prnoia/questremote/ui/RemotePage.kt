@@ -94,6 +94,9 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
         }
         b.btnSendRaw.setOnClickListener { sendRaw() }
 
+        // Экран пересоздан при живой связи (поворот, возврат в приложение) — сразу показываем видео.
+        if (Session.link != null) loadMedia()
+
         // Шлем подключился по ADB — автоматически поднимаем связь с клиентом.
         activity.lifecycleScope.launch {
             QuestController.state.collect { st ->
@@ -114,7 +117,13 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
     }
 
     fun onShown() {
-        if (Session.link == null) b.linkStatus.text = Session.state.value
+        if (Session.link == null) {
+            b.linkStatus.text = Session.state.value
+            if (QuestController.isConnected) autoLink()
+        } else if (b.mediaList.childCount == 0) {
+            // Связь пережила пересоздание экрана, а список видео — нет: подгружаем заново.
+            loadMedia()
+        }
     }
 
     // ---- Подключение ----

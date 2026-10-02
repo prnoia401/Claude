@@ -309,7 +309,7 @@ class EndToEndTest {
         connectIfNeeded()
         ActivityScenario.launch(MainActivity::class.java).use {
             clickTab(R.id.tab_files)
-            clickWhenShown("📁 Download")
+            clickWhenShown("📁 DCIM")
             clickTab(R.id.tab_apps)
             clickWhenShown("com.prnoia.questclient")
             clickWhenShown("Версия и сведения")
