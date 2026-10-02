@@ -49,23 +49,6 @@ jobs:
           name: QuestRemote-${{ github.run_number }}
           path: QuestRemote*-${{ github.run_number }}.apk
 
-      # Отдельный релиз на каждую сборку: APK можно скачать прямо с телефона
-      # со страницы Releases, без входа в GitHub Actions.
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Quest Remote build ${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          prerelease: true
-          files: |
-            QuestRemote-${{ github.run_number }}.apk
-            QuestRemoteClient-${{ github.run_number }}.apk
-          body: |
-            Тестовая сборка из ветки `${{ github.ref_name }}` (${{ github.sha }}).
-            Телефон: `adb install -r QuestRemote-${{ github.run_number }}.apk` (или скачать файл на телефон и открыть).
-            Клиент для шлема вшит в пульт (вкладка «Пульт» → «Установить клиент на шлем»); отдельный файл: QuestRemoteClient-${{ github.run_number }}.apk.
-
   # Сквозные тесты на эмуляторе Android 11 (API 30): настоящий adbd, клиент, плеер, интерфейс.
   e2e:
     runs-on: ubuntu-latest
@@ -109,3 +92,28 @@ jobs:
             /tmp/logcat.txt
           if-no-files-found: ignore
 
+  # Релиз публикуется только если прошли и сборка, и сквозные тесты на эмуляторе.
+  release:
+    needs: [build, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: QuestRemote-${{ github.run_number }}
+
+      # Отдельный релиз на каждую сборку: APK можно скачать прямо с телефона
+      # со страницы Releases, без входа в GitHub Actions.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Quest Remote build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: |
+            QuestRemote-${{ github.run_number }}.apk
+            QuestRemoteClient-${{ github.run_number }}.apk
+          body: |
+            Тестовая сборка из ветки `${{ github.ref_name }}` (${{ github.sha }}).
+            Телефон: `adb install -r QuestRemote-${{ github.run_number }}.apk` (или скачать файл на телефон и открыть).
+            Клиент для шлема вшит в пульт (вкладка «Пульт» → «Установить клиент на шлем»); отдельный файл: QuestRemoteClient-${{ github.run_number }}.apk.
