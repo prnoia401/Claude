@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -84,13 +86,44 @@ object QuestController {
 
     val profile: DeviceProfile? get() = (_state.value as? State.Connected)?.profile
 
+    /** Через USB ли текущее (или устанавливаемое) подключение. */
+    val isUsb: Boolean get() = lastTarget is Target.Usb
+
+    // Попытки подключения строго по очереди: две параллельные (например, системный диалог USB
+    // и фоновый обработчик) обрывали друг друга посреди рукопожатия.
+    private val connectMutex = Mutex()
+
+    // Увеличивается при «Отключить»: попытки, ждавшие своей очереди, после этого не запускаются.
+    @Volatile
+    private var userGeneration = 0
+
     suspend fun connectUsb(manager: UsbManager, device: UsbDevice) {
-        lastTarget = Target.Usb(device.deviceName)
-        connect("USB") { UsbTransport.open(manager, device) }
+        val gen = userGeneration
+        connectMutex.withLock {
+            if (gen != userGeneration) return
+            connectUsbLocked(manager, device)
+        }
     }
 
     suspend fun connectWifi(host: String, port: Int) {
-        lastTarget = Target.Wifi(host, port)
+        val gen = userGeneration
+        connectMutex.withLock {
+            if (gen != userGeneration) return
+            connectWifiLocked(host, port)
+        }
+    }
+
+    private suspend fun connectUsbLocked(manager: UsbManager, device: UsbDevice) {
+        val target = Target.Usb(device.deviceName)
+        if (lastTarget == target && isConnected) return
+        lastTarget = target
+        connect("USB") { UsbTransport.open(manager, device) }
+    }
+
+    private suspend fun connectWifiLocked(host: String, port: Int) {
+        val target = Target.Wifi(host, port)
+        if (lastTarget == target && isConnected) return
+        lastTarget = target
         connect("$host:$port") { TcpTransport(host, port) }
     }
 
@@ -99,11 +132,32 @@ object QuestController {
             closeCurrent()
             val myAttempt = ++attempt
             _state.value = State.Connecting(via)
+            // Шлем может не ответить на рукопожатие (например, сразу после перевтыкания кабеля).
+            // Без таймаута приложение навсегда оставалось в «Подключение…».
+            val timer = scope.launch {
+                delay(HANDSHAKE_TIMEOUT_MS)
+                val st = _state.value
+                if (myAttempt == attempt && st is State.Connecting && !st.awaitingApproval) {
+                    pendingTransport?.let { runCatching { it.close() } }
+                }
+                delay(APPROVAL_TIMEOUT_MS)
+                if (myAttempt == attempt && _state.value is State.Connecting) {
+                    pendingTransport?.let { runCatching { it.close() } }
+                }
+            }
             try {
                 val transport = openTransport()
                 pendingTransport = transport
-                val c = AdbConnection.connect(transport, crypto, keyName) {
-                    if (myAttempt == attempt) _state.value = State.Connecting(via, awaitingApproval = true)
+                val c = try {
+                    AdbConnection.connect(transport, crypto, keyName) {
+                        if (myAttempt == attempt) _state.value = State.Connecting(via, awaitingApproval = true)
+                    }
+                } catch (e: Exception) {
+                    throw if (myAttempt == attempt && _state.value is State.Connecting) {
+                        java.io.IOException("шлем не ответил на подключение. Повторите или переподключите кабель", e)
+                    } else e
+                } finally {
+                    timer.cancel()
                 }
                 pendingTransport = null
                 if (myAttempt != attempt) {
@@ -126,6 +180,7 @@ object QuestController {
 
     /** Отключиться по просьбе пользователя: без автопереподключения. */
     fun disconnect() {
+        userGeneration++
         lastTarget = null
         reconnectJob?.cancel()
         closeCurrent()
@@ -134,13 +189,17 @@ object QuestController {
 
     private fun closeCurrent() {
         attempt++
-        pendingTransport?.let { runCatching { it.close() } }
+        val t = pendingTransport
         pendingTransport = null
         watchdog?.cancel()
         recording = null
         val c = connection
         connection = null
-        c?.close()
+        // Закрытие USB/сокета может ненадолго блокироваться — никогда не делаем его в UI-потоке.
+        if (t != null || c != null) scope.launch {
+            t?.let { runCatching { it.close() } }
+            c?.let { runCatching { it.close() } }
+        }
     }
 
     private fun lost(c: AdbConnection, e: Throwable) {
@@ -148,7 +207,7 @@ object QuestController {
         watchdog?.cancel()
         connection = null
         recording = null
-        c.close()
+        scope.launch { runCatching { c.close() } }
         val target = lastTarget
         val retry = autoReconnect && target is Target.Wifi
         _state.value = State.Failed("Связь потеряна: ${e.describe()}", reconnecting = retry)
@@ -232,6 +291,48 @@ object QuestController {
                 .resolve("headset_${System.currentTimeMillis()}.png")
                 .apply { writeBytes(png) }
         }
+    }
+
+    /** Громкость медиа на шлеме: текущее значение и максимум. */
+    data class Volume(val current: Int, val max: Int) {
+        val percent: Int get() = if (max > 0) current * 100 / max else 0
+        override fun toString() = "Громкость $current из $max ($percent%)"
+    }
+
+    // Какая из команд управления громкостью работает на этом шлеме (зависит от версии Android).
+    @Volatile
+    private var volumeTool: String? = null
+
+    private val volumeRegex = Regex("""volume is (\d+) in range \[(\d+)\.\.(\d+)]""")
+
+    private suspend fun volumeCmd(tool: String, args: String): Volume? {
+        val apply = if (args.isEmpty()) "" else "$tool --stream 3 $args >/dev/null 2>&1; "
+        return volumeRegex.findAll(shell("$apply$tool --stream 3 --get 2>&1")).lastOrNull()?.let {
+            Volume(it.groupValues[1].toInt(), it.groupValues[3].toInt())
+        }
+    }
+
+    /**
+     * Изменить громкость медиа: [delta] шагов (±) или [percent] 0–100.
+     * Сначала через аудиосервис (`cmd media_session volume` / `media volume`), с проверкой
+     * результата; если шлем их не поддерживает — нажатиями клавиш громкости.
+     */
+    suspend fun mediaVolume(delta: Int = 0, percent: Int? = null): Volume? {
+        val tools = listOfNotNull(volumeTool) + listOf("cmd media_session volume", "media volume")
+        for (tool in tools.distinct()) {
+            val before = volumeCmd(tool, "") ?: continue
+            volumeTool = tool
+            val target = when {
+                percent != null -> (percent.coerceIn(0, 100) * before.max + 50) / 100
+                else -> (before.current + delta).coerceIn(0, before.max)
+            }
+            return volumeCmd(tool, "--set $target")
+        }
+        // Нет консольной команды громкости — жмём клавиши.
+        val key = if ((percent ?: 50) > 50 || delta > 0) "KEYCODE_VOLUME_UP" else "KEYCODE_VOLUME_DOWN"
+        val presses = if (percent != null) 15 else kotlin.math.abs(delta).coerceAtLeast(1)
+        shell(List(presses) { "input keyevent $key" }.joinToString("; "))
+        return null
     }
 
     /** Поток к TCP-порту на самом шлеме (как `adb forward`), например к клиенту пульта. */
@@ -332,6 +433,8 @@ object QuestController {
     private const val WATCHDOG_PERIOD_MS = 10_000L
     private const val WATCHDOG_TIMEOUT_S = 10L
     private const val RECONNECT_ATTEMPTS = 5
+    private const val HANDSHAKE_TIMEOUT_MS = 8_000L
+    private const val APPROVAL_TIMEOUT_MS = 90_000L
 
     fun Throwable.describe(): String {
         val root = generateSequence(this) { it.cause }.last()

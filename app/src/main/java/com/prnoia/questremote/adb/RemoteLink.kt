@@ -86,7 +86,8 @@ class RemoteLink private constructor(
     private fun shutdown(reason: String) {
         if (isClosed) return
         isClosed = true
-        runCatching { closer.close() }
+        // Закрытие ADB-потока отправляет пакет по USB — не делаем это в UI-потоке.
+        Thread { runCatching { closer.close() } }.start()
         pending.values.forEach { it.completeExceptionally(IOException(reason)) }
         pending.clear()
         onClosed?.invoke(reason)

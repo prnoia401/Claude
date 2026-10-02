@@ -4,15 +4,23 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.hardware.usb.UsbDevice
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSuggestion
+import android.os.Build
+import android.provider.Settings
 import android.text.InputType
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.core.content.FileProvider
 import androidx.core.view.isVisible
+import androidx.core.widget.doAfterTextChanged
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.prnoia.questremote.adb.AutoConnect
 import com.prnoia.questremote.adb.DeviceProfile
 import com.prnoia.questremote.adb.NetworkScanner
 import com.prnoia.questremote.adb.QuestController
@@ -45,6 +53,7 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
         b.btnScan.setOnClickListener { scan() }
         b.btnDisconnect.setOnClickListener { QuestController.disconnect() }
         b.btnRefreshInfo.setOnClickListener { refreshInfo() }
+        setupAutomation()
         b.btnTweaks.setOnClickListener { activity.showTab(com.prnoia.questremote.R.id.tab_tweaks) }
 
         if (!activity.packageManager.hasSystemFeature("android.hardware.usb.host")) {
@@ -56,9 +65,10 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
             Action("Скриншот") { screenshot() },
             Action("Домой") { key("Домой", "KEYCODE_HOME") },
             Action("Назад") { key("Назад", "KEYCODE_BACK") },
-            Action("Громкость +") { key("Громкость +", "KEYCODE_VOLUME_UP") },
-            Action("Громкость −") { key("Громкость −", "KEYCODE_VOLUME_DOWN") },
-            Action("Без звука") { key("Без звука", "KEYCODE_VOLUME_MUTE") },
+            Action("Громкость +") { volume("Громкость +", delta = +1) },
+            Action("Громкость −") { volume("Громкость −", delta = -1) },
+            Action("Без звука") { volume("Без звука", percent = 0) },
+            Action("Громкость 50%") { volume("Громкость 50%", percent = 50) },
             Action("Разбудить") { key("Разбудить", "KEYCODE_WAKEUP") },
             Action("Усыпить") { key("Усыпить", "KEYCODE_SLEEP") },
             Action("Ввести текст") { typeText() },
@@ -110,18 +120,87 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
             is State.Connected -> "✅ ${state.profile.name} (${state.profile.vendor.title})\n${state.via}"
             is State.Failed -> "❌ ${state.message}" + if (state.reconnecting) "\nПереподключаюсь…" else ""
         }
-        val busy = state is State.Connecting
-        b.btnUsb.isEnabled = !busy
-        b.btnWifi.isEnabled = !busy
-        b.btnDisconnect.isVisible = state is State.Connected || busy ||
-            (state is State.Failed && state.reconnecting)
+        // Кнопки подключения не блокируем никогда: если что-то повисло, всегда можно начать заново.
+        b.btnDisconnect.isVisible = state !is State.Disconnected
         if (state !is State.Connected) {
             b.info.text = "—"
             recordChip.isChecked = false
         }
     }
 
+    // ---- Автоматизация (Wi‑Fi шлема, ADB по сети) ----
+
+    private fun setupAutomation() {
+        if (b.inputIp.text.isNullOrBlank()) AutoConnect.headsetIp?.let { b.inputIp.setText(it) }
+        b.switchAutoWifi.isChecked = AutoConnect.autoWifi
+        b.switchAutoWifi.setOnCheckedChangeListener { _, checked ->
+            AutoConnect.autoWifi = checked
+            if (checked && QuestController.isConnected && QuestController.isUsb) AutoConnect.setupWifi()
+        }
+        b.inputSsid.setText(AutoConnect.ssid)
+        b.inputWifiPassword.setText(AutoConnect.password)
+        b.inputSsid.doAfterTextChanged { AutoConnect.ssid = it?.toString()?.trim().orEmpty() }
+        b.inputWifiPassword.doAfterTextChanged { AutoConnect.password = it?.toString().orEmpty() }
+        b.btnHeadsetWifiOn.setOnClickListener {
+            if (!QuestController.isConnected) activity.toast("Сначала подключите шлем (кабелем)")
+            else AutoConnect.setupWifi()
+        }
+        b.btnHeadsetWifiOff.setOnClickListener {
+            activity.runAction("Отключить Wi‑Fi шлема") { AutoConnect.disconnectHeadsetWifi().ifBlank { "Wi‑Fi шлема выключен" } }
+        }
+        b.btnPhoneWifi.setOnClickListener { connectPhoneToWifi() }
+        activity.lifecycleScope.launch {
+            activity.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    AutoConnect.status.collect { text ->
+                        b.autoStatus.text = text.ifEmpty { "Воткните кабель — шлем подключится сам." }
+                        AutoConnect.headsetIp?.let { ip -> if (b.inputIp.text.isNullOrBlank()) b.inputIp.setText(ip) }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Добавить рабочую сеть в телефон, чтобы он сам подключался к ней (Android 10+). */
+    private fun connectPhoneToWifi() {
+        val ssid = AutoConnect.ssid
+        if (ssid.isBlank()) {
+            activity.toast("Укажите название сети")
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            activity.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+            return
+        }
+        val suggestion = WifiNetworkSuggestion.Builder()
+            .setSsid(ssid)
+            .apply { if (AutoConnect.password.isNotEmpty()) setWpa2Passphrase(AutoConnect.password) }
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Системный диалог «Сохранить сеть?» — после него телефон подключается к ней сам.
+            val intent = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
+                .putParcelableArrayListExtra(Settings.EXTRA_WIFI_NETWORK_LIST, arrayListOf(suggestion))
+            runCatching { activity.startActivity(intent) }
+                .onFailure { activity.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+        } else {
+            val wifi = activity.applicationContext.getSystemService(WifiManager::class.java)
+            val status = wifi.addNetworkSuggestions(listOf(suggestion))
+            activity.toast(
+                if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+                    "Сеть «$ssid» добавлена. Разрешите подключение в уведомлении Android."
+                } else {
+                    "Не удалось добавить сеть (код $status) — подключитесь в настройках Wi‑Fi"
+                }
+            )
+        }
+    }
+
     private fun key(title: String, code: String) = activity.runCommand(title, "input keyevent $code")
+
+    private fun volume(title: String, delta: Int = 0, percent: Int? = null) = activity.runAction(title) {
+        val v = QuestController.mediaVolume(delta, percent)
+        (v?.toString() ?: "Отправлены клавиши громкости (точное значение шлем не сообщает)").also { activity.toast(it) }
+    }
 
     // ---- Подключение ----
 
@@ -150,16 +229,7 @@ class DevicePage(private val activity: MainActivity, private val b: PageDeviceBi
         }
     }
 
-    fun connectUsb(device: UsbDevice) {
-        activity.lifecycleScope.launch {
-            val granted = UsbAdb.requestPermission(activity, activity.usbManager, device)
-            if (!granted) {
-                activity.toast("Доступ к USB‑устройству не выдан")
-                return@launch
-            }
-            QuestController.connectUsb(activity.usbManager, device)
-        }
-    }
+    fun connectUsb(device: UsbDevice) = AutoConnect.connectUsb(device)
 
     private fun connectWifi() {
         val ip = b.inputIp.text.toString().trim()

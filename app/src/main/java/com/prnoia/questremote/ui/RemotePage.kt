@@ -14,6 +14,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
+import com.prnoia.questremote.BuildConfig
 import com.prnoia.questremote.adb.NetworkScanner
 import com.prnoia.questremote.adb.QuestController
 import com.prnoia.questremote.adb.RemoteLink
@@ -35,6 +36,7 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
 
     private val prefs = activity.getSharedPreferences("remote", Context.MODE_PRIVATE)
     private var userSeeking = false
+    private var autoLinking = false
 
     init {
         b.remoteIp.setText(prefs.getString("ip", ""))
@@ -91,6 +93,13 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
             })
         }
         b.btnSendRaw.setOnClickListener { sendRaw() }
+
+        // Шлем подключился по ADB — автоматически поднимаем связь с клиентом.
+        activity.lifecycleScope.launch {
+            QuestController.state.collect { st ->
+                if (st is QuestController.State.Connected && Session.link == null) autoLink()
+            }
+        }
 
         activity.lifecycleScope.launch {
             activity.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -156,9 +165,24 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
         }
     }
 
-    /** Поставить клиент из assets пульта на шлем, выдать разрешения и запустить. */
+    /** Кнопка «Установить клиент»: всегда переустанавливает и сразу подключается. */
     private fun installClient() {
         activity.runAction("Установка клиента на шлем") {
+            val msg = ensureClient(forceInstall = true)
+            autoLink()
+            msg
+        }
+    }
+
+    /**
+     * Убедиться, что на шлеме стоит актуальный клиент, у него есть разрешения и он запущен.
+     * Возвращает описание сделанного.
+     */
+    private suspend fun ensureClient(forceInstall: Boolean = false): String {
+        val installed = QuestController.shell("dumpsys package $CLIENT | grep -m1 versionCode")
+        val code = Regex("""versionCode=(\d+)""").find(installed)?.groupValues?.get(1)?.toIntOrNull()
+        var done = "Клиент уже установлен"
+        if (forceInstall || code == null || code < BuildConfig.VERSION_CODE) {
             val apk = withContext(Dispatchers.IO) {
                 File(activity.cacheDir, "client.apk").also { f ->
                     activity.assets.open("client.apk").use { input -> f.outputStream().use { input.copyTo(it) } }
@@ -166,17 +190,51 @@ class RemotePage(private val activity: MainActivity, private val b: PageRemoteBi
             }
             val result = QuestController.install(apk)
             apk.delete()
-            if (!result.startsWith("Success")) throw java.io.IOException(result)
-            QuestController.shell(
-                listOf(
-                    // Открывать плеер и приложения по команде, когда клиент в фоне.
-                    "appops set $CLIENT SYSTEM_ALERT_WINDOW allow",
-                    // Чтение видео из общей памяти на Android 11+.
-                    "appops set $CLIENT MANAGE_EXTERNAL_STORAGE allow",
-                    "am start-foreground-service -n $CLIENT/.CommandService",
-                ).joinToString("; ") { "$it 2>/dev/null" }
-            )
-            "Клиент установлен и запущен. Нажмите «Подключиться через ADB»."
+            if (!result.startsWith("Success")) throw java.io.IOException("Установка клиента: $result")
+            done = if (code == null) "Клиент установлен" else "Клиент обновлён"
+        }
+        QuestController.shell(
+            listOf(
+                // Открывать плеер и приложения по команде, когда клиент в фоне.
+                "appops set $CLIENT SYSTEM_ALERT_WINDOW allow",
+                // Чтение видео из общей памяти на Android 11+.
+                "appops set $CLIENT MANAGE_EXTERNAL_STORAGE allow",
+                "am start-foreground-service -n $CLIENT/.CommandService",
+            ).joinToString("; ") { "$it >/dev/null 2>&1" }
+        )
+        return done
+    }
+
+    /** Шлем подключён по ADB — сами ставим/запускаем клиент и подключаемся к нему. */
+    private fun autoLink() {
+        if (Session.link != null || autoLinking) return
+        autoLinking = true
+        activity.lifecycleScope.launch {
+            try {
+                Session.state.value = "Готовлю клиент на шлеме…"
+                val note = ensureClient()
+                // Служба клиента поднимается не мгновенно — несколько попыток.
+                var last: Exception? = null
+                for (i in 1..5) {
+                    if (!QuestController.isConnected) return@launch
+                    try {
+                        val link = RemoteLink.viaAdb()
+                        Session.attach(link)
+                        activity.console.log("Пульт: $note, подключено ${link.description}", ConsoleAdapter.Kind.COMMAND)
+                        runCatching { link.request("status") }
+                        loadMedia()
+                        return@launch
+                    } catch (e: Exception) {
+                        last = e
+                        kotlinx.coroutines.delay(1_000L * i)
+                    }
+                }
+                Session.state.value = "Клиент не отвечает: ${last?.message}"
+            } catch (e: Exception) {
+                Session.state.value = "Ошибка: ${e.message}"
+            } finally {
+                autoLinking = false
+            }
         }
     }
 

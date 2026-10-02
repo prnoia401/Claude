@@ -166,8 +166,7 @@ class MainActivity : AppCompatActivity() {
         if (intent?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
         val usb = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
             ?: return
-        val state = QuestController.state.value
-        if (state !is State.Connected && state !is State.Connecting) device.connectUsb(usb)
+        com.prnoia.questremote.adb.AutoConnect.onUsbAttached(usb, explicit = true)
     }
 
     fun showTab(id: Int) {
